@@ -1,0 +1,52 @@
+services:
+  server:
+    image: prefecthq/prefect:3-latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: prefect-server
+    restart: always
+    ports:
+      - "4200:4200"
+    volumes:
+      - prefect-data:/root/.prefect
+    environment:
+      - PREFECT_UI_URL=http://127.0.0.1:4200/api
+      - PREFECT_API_URL=http://127.0.0.1:4200/api
+      - PREFECT_SERVER_API_HOST=0.0.0.0
+    command: ["prefect", "server", "start"]
+    networks:
+      - prefect-network
+
+  worker:
+    image: prefecthq/prefect:3-latest
+    container_name: prefect-worker
+    restart: always
+    depends_on:
+      - server
+    environment:
+      - PREFECT_API_URL=http://server:4200/api
+    command: ["prefect", "worker", "start", "--pool", "my-docker-pool", "--type", "docker"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - prefect-network
+
+  cli:
+    image: prefecthq/prefect:3-latest
+    container_name: prefect-cli
+    entrypoint: "bash"
+    working_dir: "/root/flows"
+    volumes:
+      - "./flows:/root/flows"
+    environment:
+      - PREFECT_API_URL=http://server:4200/api
+    networks:
+      - prefect-network
+
+volumes:
+  prefect-data:
+
+networks:
+  prefect-network:
+    driver: bridge

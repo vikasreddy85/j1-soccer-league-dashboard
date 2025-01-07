@@ -1,0 +1,9 @@
+pandas==2.2.2
+prefect-github==0.3.1
+prefect==3.1.11
+prefect-docker==0.6.2
+prefect-gcp==0.6.2
+prefect-sqlalchemy==0.5.2
+protobuf==4.21.11
+pandas-gbq==0.18.1
+httpx==0.26.0
