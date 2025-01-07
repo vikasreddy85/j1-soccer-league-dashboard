@@ -35,10 +35,10 @@ services:
   cli:
     image: prefecthq/prefect:3-latest
     container_name: prefect-cli
-    entrypoint: "bash"
-    working_dir: "/root/flows"
+    entrypoint: "tail -f /dev/null"
+    working_dir: "/root/app/flows"
     volumes:
-      - "./flows:/root/flows"
+      - "./flows:/root/app/flows"
     environment:
       - PREFECT_API_URL=http://server:4200/api
     networks:
