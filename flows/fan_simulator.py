@@ -30,11 +30,6 @@ PERSONAS = [
 
 
 def check_ollama_available(timeout: float = 2.0) -> bool:
-    """Cheap health check against Ollama's own API. Callers should use this
-    to decide whether to show/attempt fan-reaction simulation at all, rather
-    than firing off several slow requests that are guaranteed to time out —
-    e.g. when the dashboard is deployed somewhere like Streamlit Community
-    Cloud, which has no local Ollama instance to talk to."""
     try:
         resp = requests.get(OLLAMA_URL.replace("/api/chat", "/api/tags"), timeout=timeout)
         return resp.ok
@@ -62,7 +57,6 @@ def _call_ollama(system_prompt: str, user_prompt: str) -> str:
 
 def simulate_reactions(home_team: str, away_team: str, home_win_prob: float,
                         draw_prob: float, away_win_prob: float) -> list:
-    """Returns a list of {persona, label, text} dicts, one per persona."""
     match_context = (
         f"Upcoming match: {home_team} (home) vs {away_team} (away).\n"
         f"Model win probabilities — {home_team}: {home_win_prob:.0%}, "
@@ -81,7 +75,6 @@ def simulate_reactions(home_team: str, away_team: str, home_win_prob: float,
 
 
 if __name__ == "__main__":
-    # Quick manual test
     reactions = simulate_reactions("Kashima Antlers", "Urawa Red Diamonds", 0.45, 0.28, 0.27)
     for r in reactions:
         print(f"[{r['label']}] {r['text']}")

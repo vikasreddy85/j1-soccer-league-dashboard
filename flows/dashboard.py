@@ -1,12 +1,3 @@
-"""
-Live dashboard for the J-League predictor project.
-
-Run with:
-    streamlit run dashboard.py
-
-Requires: streamlit, duckdb, pandas, joblib, plotly
-    pip install streamlit duckdb pandas joblib plotly --break-system-packages
-"""
 import duckdb
 import pandas as pd
 import joblib
@@ -46,20 +37,10 @@ def load_matches():
 
 
 def accuracy_tracker(model, feature_cols, played: pd.DataFrame, squad: pd.DataFrame, n_matches: int = 30):
-    """Backtest: for the most recent already-played matches, compare the
-    model's top prediction against the actual result. Uses the exact same
-    feature pipeline as training, so it can't drift out of sync again."""
     features, _, _ = build_features_from_matches(played, squad)
     features = features.dropna(subset=feature_cols).sort_values("MatchDate").tail(n_matches)
 
     label_names = ["HOME_WIN", "DRAW", "AWAY_WIN"]
-
-    # Predict on the full feature slice in one batch call. Pulling single rows
-    # out via iterrows() (r[feature_cols].to_frame().T) turns each row into a
-    # Series first, which forces every column to a common dtype (object, since
-    # the row mixes ints/floats) — that's what was tripping up XGBoost, which
-    # only accepts numeric/bool/category dtypes. Slicing features[feature_cols]
-    # keeps each column's real dtype intact.
     X = features[feature_cols]
     probs = model.predict_proba(X)
     predicted = [label_names[i] for i in probs.argmax(axis=1)]
@@ -74,10 +55,6 @@ def accuracy_tracker(model, feature_cols, played: pd.DataFrame, squad: pd.DataFr
     accuracy = backtest_df["Correct"].mean() if not backtest_df.empty else 0
     return accuracy, backtest_df
 
-
-# --------------------------------------------------------------------------
-# UI
-# --------------------------------------------------------------------------
 st.title("J-League match & fan reaction predictor")
 
 try:
