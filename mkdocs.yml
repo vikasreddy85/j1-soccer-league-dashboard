@@ -1,0 +1,42 @@
+site_name: J-League Predictor
+site_description: Match outcome prediction and fan reaction simulation for the J1 League
+repo_url: https://github.com/your-username/j1-soccer-league-dashboard
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.top
+    - content.code.copy
+    - toc.integrate
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight
+  - tables
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Architecture & Data Pipeline: architecture.md
+  - Fan Reactions (Ollama): fan-reactions.md
+  - Deploying for Free: deployment.md

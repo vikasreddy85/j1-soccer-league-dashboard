@@ -1,0 +1,12 @@
+streamlit
+duckdb
+pandas
+numpy
+joblib
+plotly
+scikit-learn
+xgboost
+requests
+beautifulsoup4
+prefect
+mkdocs
