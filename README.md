@@ -82,22 +82,6 @@ The dashboard itself (predictions, backtest, charts) works fine on
 See [docs/deployment.md](docs/deployment.md) for the full walkthrough,
 including why fan reactions are disabled automatically on hosted deployments.
 
-## Requirements
-
-```
-streamlit
-duckdb
-pandas
-numpy
-joblib
-plotly
-scikit-learn
-xgboost
-requests
-beautifulsoup4
-prefect
-```
-
 ## Project structure
 
 ```
@@ -120,8 +104,3 @@ prefect
 ## Docs
 
 View the [documentation](https://vikasreddy85.github.io/j1-soccer-league-dashboard/) to learn more about the project.
-
-```bash
-pip install mkdocs mkdocs-material
-mkdocs serve   # http://localhost:8000
-```
