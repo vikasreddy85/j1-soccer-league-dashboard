@@ -117,6 +117,10 @@ prefect
     └── deployment.md
 ```
 
+## Docs
+
+View the [documentation](https://vikasreddy85.github.io/j1-soccer-league-dashboard/) to learn more about the project.
+
 ```bash
 pip install mkdocs mkdocs-material
 mkdocs serve   # http://localhost:8000
