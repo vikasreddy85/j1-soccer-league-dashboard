@@ -1,4 +1,4 @@
-# J-League Match & Fan Reaction Predictor
+# J-League Match & Fan Reaction Predictor [[**Live Demo**](https://j1-soccer.streamlit.app/?utm_source=chatgpt.com)]
 
 A Streamlit dashboard that predicts J1 League match outcomes (home win / draw /
 away win) with an XGBoost model trained on historical results, team form, Elo
