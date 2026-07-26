@@ -5,6 +5,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.inspection import permutation_importance
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     accuracy_score,
     classification_report,
@@ -12,6 +13,8 @@ from sklearn.metrics import (
     log_loss,
 )
 from sklearn.model_selection import RandomizedSearchCV, TimeSeriesSplit
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
 from sklearn.utils.class_weight import compute_sample_weight
 
 USE_XGBOOST = True
@@ -24,24 +27,42 @@ else:
 DB_PATH = "./j1_league.duckdb"
 MODEL_PATH = "./outcome_predictor.joblib"
 FORM_WINDOW = 5
+FORM_WINDOW_SHORT = 3
+FORM_WINDOW_LONG = 10
+H2H_WINDOW = 5
+ELO_HOME_ADVANTAGE = 60
+ELO_SCALE = 400
 TEST_SIZE_FRACTION = 0.2
+VAL_SIZE_FRACTION = 0.15
 RANDOM_STATE = 42
-N_SEARCH_ITER = 40
+N_SEARCH_ITER = 60
+EARLY_STOPPING_ROUNDS = 50
+CLASS_BALANCE_STRENGTH = 0.0
+CLASS_BALANCE_CANDIDATES = [0.0, 0.15, 0.3]
+
+ENSEMBLE_BLEND_WEIGHTS = [1.0, 0.85, 0.7, 0.5]
 
 SQUAD_BASE_COLS = ["SquadValueEUR_M", "AvgAge", "ForeignPlayers"]
 
 FEATURE_COLS = [
-    "HomeFormPoints", "HomeFormGoalsFor", "HomeFormGoalsAgainst", "HomeFormGoalDiff", "HomeMatchesPlayedSoFar",
-    "AwayFormPoints", "AwayFormGoalsFor", "AwayFormGoalsAgainst", "AwayFormGoalDiff", "AwayMatchesPlayedSoFar",
+    "HomeFormPoints", "HomeFormPointsShort", "HomeFormPointsLong",
+    "HomeFormGoalsFor", "HomeFormGoalsAgainst", "HomeFormGoalDiff", "HomeMatchesPlayedSoFar",
+    "AwayFormPoints", "AwayFormPointsShort", "AwayFormPointsLong",
+    "AwayFormGoalsFor", "AwayFormGoalsAgainst", "AwayFormGoalDiff", "AwayMatchesPlayedSoFar",
     "HomeSpecificFormPoints", "AwaySpecificFormPoints",
+    "HomeH2HFormPoints", "AwayH2HFormPoints",
     "HomeUnbeatenStreak", "AwayUnbeatenStreak",
     "HomeDaysSinceLastMatch", "AwayDaysSinceLastMatch",
     "HomeSeasonPointsSoFar", "AwaySeasonPointsSoFar", "HomeSeasonGoalDiffSoFar", "AwaySeasonGoalDiffSoFar",
-    "HomeEloPre", "AwayEloPre", "EloDiff",
+    "HomeEloPre", "AwayEloPre", "EloDiff", "EloWinProbHome",
     "HomeSquadValue", "HomeAvgAge", "HomeForeignPlayers",
     "AwaySquadValue", "AwayAvgAge", "AwayForeignPlayers",
     "SquadValueDiff", "AvgAgeDiff", "ForeignPlayersDiff",
 ]
+
+
+def elo_win_prob(home_elo, away_elo, home_advantage=ELO_HOME_ADVANTAGE, scale=ELO_SCALE):
+    return 1 / (1 + 10 ** (-((home_elo + home_advantage) - away_elo) / scale))
 
 
 def load_played_matches():
@@ -76,10 +97,10 @@ def load_upcoming_matches():
     return df
 
 
-def compute_elo_features(matches, k_factor=20, home_advantage=60, initial_rating=1500):
+def compute_elo_features(matches, k_factor=20, home_advantage=ELO_HOME_ADVANTAGE, initial_rating=1500):
     matches = matches.sort_values("MatchDate").reset_index(drop=True).copy()
     ratings = defaultdict(lambda: initial_rating)
-    home_elo_pre, away_elo_pre = [], []
+    home_elo_pre, away_elo_pre, win_prob_home = [], [], []
 
     for row in matches.itertuples():
         home_r = ratings[row.HomeTeam]
@@ -87,7 +108,9 @@ def compute_elo_features(matches, k_factor=20, home_advantage=60, initial_rating
         home_elo_pre.append(home_r)
         away_elo_pre.append(away_r)
 
-        expected_home = 1 / (1 + 10 ** (-((home_r + home_advantage) - away_r) / 400))
+        expected_home = elo_win_prob(home_r, away_r, home_advantage)
+        win_prob_home.append(expected_home)
+
         if row.Result == "HOME_WIN":
             actual_home = 1.0
         elif row.Result == "DRAW":
@@ -105,6 +128,7 @@ def compute_elo_features(matches, k_factor=20, home_advantage=60, initial_rating
     matches["HomeEloPre"] = home_elo_pre
     matches["AwayEloPre"] = away_elo_pre
     matches["EloDiff"] = matches["HomeEloPre"] - matches["AwayEloPre"]
+    matches["EloWinProbHome"] = win_prob_home
     return matches, dict(ratings)
 
 
@@ -144,6 +168,12 @@ def add_rolling_form(log: pd.DataFrame, window: int = FORM_WINDOW) -> pd.DataFra
     log["FormPoints"] = grouped["Points"].transform(
         lambda s: s.shift(1).rolling(window, min_periods=1).mean()
     )
+    log["FormPointsShort"] = grouped["Points"].transform(
+        lambda s: s.shift(1).rolling(FORM_WINDOW_SHORT, min_periods=1).mean()
+    )
+    log["FormPointsLong"] = grouped["Points"].transform(
+        lambda s: s.shift(1).rolling(FORM_WINDOW_LONG, min_periods=1).mean()
+    )
     log["FormGoalsFor"] = grouped["GoalsFor"].transform(
         lambda s: s.shift(1).rolling(window, min_periods=1).mean()
     )
@@ -179,6 +209,23 @@ def add_home_away_specific_form(log: pd.DataFrame, window: int = FORM_WINDOW):
     return home_specific, away_specific
 
 
+def add_head_to_head_form(log: pd.DataFrame, window: int = H2H_WINDOW) -> pd.DataFrame:
+    h2h = log.sort_values(["Team", "Opponent", "MatchDate"]).copy()
+    h2h["H2HFormPoints"] = h2h.groupby(["Team", "Opponent"])["Points"].transform(
+        lambda s: s.shift(1).rolling(window, min_periods=1).mean()
+    )
+    return h2h[["MatchDate", "Team", "Opponent", "H2HFormPoints"]]
+
+
+def compute_h2h_form(played: pd.DataFrame, home_team: str, away_team: str, window: int = H2H_WINDOW):
+    log = build_team_match_log(played)
+    home_meetings = log[(log["Team"] == home_team) & (log["Opponent"] == away_team)].sort_values("MatchDate")
+    away_meetings = log[(log["Team"] == away_team) & (log["Opponent"] == home_team)].sort_values("MatchDate")
+    home_h2h = home_meetings["Points"].tail(window).mean() if not home_meetings.empty else np.nan
+    away_h2h = away_meetings["Points"].tail(window).mean() if not away_meetings.empty else np.nan
+    return home_h2h, away_h2h
+
+
 def print_outcome_distribution_by_year(features):
     dist = features.groupby("Year")["Result"].value_counts(normalize=True).unstack().fillna(0)
     print("\nActual outcome distribution by year (checks for drift, e.g. rising parity):")
@@ -202,38 +249,56 @@ def build_features_from_matches(matches: pd.DataFrame, squad: pd.DataFrame):
     log = build_team_match_log(matches)
     log = add_rolling_form(log)
     home_specific, away_specific = add_home_away_specific_form(log)
+    h2h = add_head_to_head_form(log)
 
     home_form = log[log["IsHome"] == 1][[
-        "MatchDate", "Team", "FormPoints", "FormGoalsFor", "FormGoalsAgainst", "FormGoalDiff",
+        "MatchDate", "Team", "FormPoints", "FormPointsShort", "FormPointsLong",
+        "FormGoalsFor", "FormGoalsAgainst", "FormGoalDiff",
         "MatchesPlayedSoFar", "UnbeatenStreak", "DaysSinceLastMatch", "SeasonPointsSoFar", "SeasonGoalDiffSoFar"
     ]].rename(columns={
-        "Team": "HomeTeam", "FormPoints": "HomeFormPoints", "FormGoalsFor": "HomeFormGoalsFor",
+        "Team": "HomeTeam", "FormPoints": "HomeFormPoints",
+        "FormPointsShort": "HomeFormPointsShort", "FormPointsLong": "HomeFormPointsLong",
+        "FormGoalsFor": "HomeFormGoalsFor",
         "FormGoalsAgainst": "HomeFormGoalsAgainst", "FormGoalDiff": "HomeFormGoalDiff",
         "MatchesPlayedSoFar": "HomeMatchesPlayedSoFar", "UnbeatenStreak": "HomeUnbeatenStreak",
         "DaysSinceLastMatch": "HomeDaysSinceLastMatch", "SeasonPointsSoFar": "HomeSeasonPointsSoFar",
         "SeasonGoalDiffSoFar": "HomeSeasonGoalDiffSoFar"
     })
     away_form = log[log["IsHome"] == 0][[
-        "MatchDate", "Team", "FormPoints", "FormGoalsFor", "FormGoalsAgainst", "FormGoalDiff",
+        "MatchDate", "Team", "FormPoints", "FormPointsShort", "FormPointsLong",
+        "FormGoalsFor", "FormGoalsAgainst", "FormGoalDiff",
         "MatchesPlayedSoFar", "UnbeatenStreak", "DaysSinceLastMatch", "SeasonPointsSoFar", "SeasonGoalDiffSoFar"
     ]].rename(columns={
-        "Team": "AwayTeam", "FormPoints": "AwayFormPoints", "FormGoalsFor": "AwayFormGoalsFor",
+        "Team": "AwayTeam", "FormPoints": "AwayFormPoints",
+        "FormPointsShort": "AwayFormPointsShort", "FormPointsLong": "AwayFormPointsLong",
+        "FormGoalsFor": "AwayFormGoalsFor",
         "FormGoalsAgainst": "AwayFormGoalsAgainst", "FormGoalDiff": "AwayFormGoalDiff",
         "MatchesPlayedSoFar": "AwayMatchesPlayedSoFar", "UnbeatenStreak": "AwayUnbeatenStreak",
         "DaysSinceLastMatch": "AwayDaysSinceLastMatch", "SeasonPointsSoFar": "AwaySeasonPointsSoFar",
         "SeasonGoalDiffSoFar": "AwaySeasonGoalDiffSoFar"
     })
 
+    home_h2h = h2h.rename(columns={"Team": "HomeTeam", "Opponent": "AwayTeam", "H2HFormPoints": "HomeH2HFormPoints"})
+    away_h2h = h2h.rename(columns={"Team": "AwayTeam", "Opponent": "HomeTeam", "H2HFormPoints": "AwayH2HFormPoints"})
+
     features = matches_elo.merge(home_form, on=["MatchDate", "HomeTeam"], how="left")
     features = features.merge(away_form, on=["MatchDate", "AwayTeam"], how="left")
     features = features.merge(home_specific, on=["MatchDate", "HomeTeam"], how="left")
     features = features.merge(away_specific, on=["MatchDate", "AwayTeam"], how="left")
+    features = features.merge(home_h2h, on=["MatchDate", "HomeTeam", "AwayTeam"], how="left")
+    features = features.merge(away_h2h, on=["MatchDate", "HomeTeam", "AwayTeam"], how="left")
 
     core_form_cols = ["HomeFormPoints", "AwayFormPoints", "HomeFormGoalsFor", "AwayFormGoalsFor"]
     features = features.dropna(subset=core_form_cols)
 
     features["HomeSpecificFormPoints"] = features["HomeSpecificFormPoints"].fillna(features["HomeFormPoints"])
     features["AwaySpecificFormPoints"] = features["AwaySpecificFormPoints"].fillna(features["AwayFormPoints"])
+    features["HomeH2HFormPoints"] = features["HomeH2HFormPoints"].fillna(features["HomeFormPoints"])
+    features["AwayH2HFormPoints"] = features["AwayH2HFormPoints"].fillna(features["AwayFormPoints"])
+    features["HomeFormPointsShort"] = features["HomeFormPointsShort"].fillna(features["HomeFormPoints"])
+    features["AwayFormPointsShort"] = features["AwayFormPointsShort"].fillna(features["AwayFormPoints"])
+    features["HomeFormPointsLong"] = features["HomeFormPointsLong"].fillna(features["HomeFormPoints"])
+    features["AwayFormPointsLong"] = features["AwayFormPointsLong"].fillna(features["AwayFormPoints"])
     features["HomeDaysSinceLastMatch"] = features["HomeDaysSinceLastMatch"].fillna(
         features["HomeDaysSinceLastMatch"].median()
     )
@@ -316,11 +381,14 @@ def build_current_state(played: pd.DataFrame, as_of_date) -> pd.DataFrame:
     away_state = away_ext[away_ext["MatchDate"] == as_of_date].set_index("Team")["AwaySpecificFormPoints"]
 
     state = overall_state[[
-        "FormPoints", "FormGoalsFor", "FormGoalsAgainst", "FormGoalDiff",
+        "FormPoints", "FormPointsShort", "FormPointsLong",
+        "FormGoalsFor", "FormGoalsAgainst", "FormGoalDiff",
         "MatchesPlayedSoFar", "UnbeatenStreak", "DaysSinceLastMatch",
         "SeasonPointsSoFar", "SeasonGoalDiffSoFar",
     ]].copy()
     state["DaysSinceLastMatch"] = state["DaysSinceLastMatch"].fillna(7)
+    state["FormPointsShort"] = state["FormPointsShort"].fillna(state["FormPoints"])
+    state["FormPointsLong"] = state["FormPointsLong"].fillna(state["FormPoints"])
     state["HomeSpecificFormPoints"] = home_state.reindex(state.index).fillna(state["FormPoints"])
     state["AwaySpecificFormPoints"] = away_state.reindex(state.index).fillna(state["FormPoints"])
     return state
@@ -347,6 +415,12 @@ def build_matchup_features(home_team, away_team, as_of_date, played, squad, elo_
             return row[col]
         return squad_medians[col]
 
+    home_h2h, away_h2h = compute_h2h_form(played, home_team, away_team)
+    if pd.isna(home_h2h):
+        home_h2h = home["FormPoints"]
+    if pd.isna(away_h2h):
+        away_h2h = away["FormPoints"]
+
     home_elo = elo_ratings.get(home_team, 1500)
     away_elo = elo_ratings.get(away_team, 1500)
     home_squad_value = squad_value(home_squad_row, "SquadValueEUR_M")
@@ -357,19 +431,25 @@ def build_matchup_features(home_team, away_team, as_of_date, played, squad, elo_
     away_foreign = squad_value(away_squad_row, "ForeignPlayers")
 
     row = {
-        "HomeFormPoints": home["FormPoints"], "HomeFormGoalsFor": home["FormGoalsFor"],
+        "HomeFormPoints": home["FormPoints"],
+        "HomeFormPointsShort": home["FormPointsShort"], "HomeFormPointsLong": home["FormPointsLong"],
+        "HomeFormGoalsFor": home["FormGoalsFor"],
         "HomeFormGoalsAgainst": home["FormGoalsAgainst"], "HomeFormGoalDiff": home["FormGoalDiff"],
         "HomeMatchesPlayedSoFar": home["MatchesPlayedSoFar"],
-        "AwayFormPoints": away["FormPoints"], "AwayFormGoalsFor": away["FormGoalsFor"],
+        "AwayFormPoints": away["FormPoints"],
+        "AwayFormPointsShort": away["FormPointsShort"], "AwayFormPointsLong": away["FormPointsLong"],
+        "AwayFormGoalsFor": away["FormGoalsFor"],
         "AwayFormGoalsAgainst": away["FormGoalsAgainst"], "AwayFormGoalDiff": away["FormGoalDiff"],
         "AwayMatchesPlayedSoFar": away["MatchesPlayedSoFar"],
         "HomeSpecificFormPoints": home["HomeSpecificFormPoints"],
         "AwaySpecificFormPoints": away["AwaySpecificFormPoints"],
+        "HomeH2HFormPoints": home_h2h, "AwayH2HFormPoints": away_h2h,
         "HomeUnbeatenStreak": home["UnbeatenStreak"], "AwayUnbeatenStreak": away["UnbeatenStreak"],
         "HomeDaysSinceLastMatch": home["DaysSinceLastMatch"], "AwayDaysSinceLastMatch": away["DaysSinceLastMatch"],
         "HomeSeasonPointsSoFar": home["SeasonPointsSoFar"], "AwaySeasonPointsSoFar": away["SeasonPointsSoFar"],
         "HomeSeasonGoalDiffSoFar": home["SeasonGoalDiffSoFar"], "AwaySeasonGoalDiffSoFar": away["SeasonGoalDiffSoFar"],
         "HomeEloPre": home_elo, "AwayEloPre": away_elo, "EloDiff": home_elo - away_elo,
+        "EloWinProbHome": elo_win_prob(home_elo, away_elo),
         "HomeSquadValue": home_squad_value, "HomeAvgAge": home_avg_age, "HomeForeignPlayers": home_foreign,
         "AwaySquadValue": away_squad_value, "AwayAvgAge": away_avg_age, "AwayForeignPlayers": away_foreign,
         "SquadValueDiff": home_squad_value - away_squad_value,
@@ -379,19 +459,41 @@ def build_matchup_features(home_team, away_team, as_of_date, played, squad, elo_
     return pd.DataFrame([row])[feature_cols]
 
 
-def time_based_split(features, X, y, test_fraction=TEST_SIZE_FRACTION):
+def time_based_split(features, X, y, test_fraction=TEST_SIZE_FRACTION, val_fraction=VAL_SIZE_FRACTION):
     sorted_idx = features.sort_values("MatchDate").index
-    split_point = int(len(sorted_idx) * (1 - test_fraction))
-    train_idx, test_idx = sorted_idx[:split_point], sorted_idx[split_point:]
+    n = len(sorted_idx)
+    test_start = int(n * (1 - test_fraction))
+    val_start = int(test_start * (1 - val_fraction))
 
-    X_train, X_test = X.loc[train_idx], X.loc[test_idx]
-    y_train, y_test = y.loc[train_idx], y.loc[test_idx]
+    train_idx = sorted_idx[:val_start]
+    val_idx = sorted_idx[val_start:test_start]
+    test_idx = sorted_idx[test_start:]
 
-    train_dates = features.loc[train_idx, "MatchDate"]
-    test_dates = features.loc[test_idx, "MatchDate"]
-    print(f"Train period: {train_dates.min().date()} to {train_dates.max().date()} ({len(train_idx)} matches)")
-    print(f"Test period:  {test_dates.min().date()} to {test_dates.max().date()} ({len(test_idx)} matches)")
-    return X_train, X_test, y_train, y_test
+    X_train, X_val, X_test = X.loc[train_idx], X.loc[val_idx], X.loc[test_idx]
+    y_train, y_val, y_test = y.loc[train_idx], y.loc[val_idx], y.loc[test_idx]
+
+    def _describe(idx, label):
+        dates = features.loc[idx, "MatchDate"]
+        print(f"{label} period: {dates.min().date()} to {dates.max().date()} ({len(idx)} matches)")
+
+    _describe(train_idx, "Train")
+    _describe(val_idx, "Validation")
+    _describe(test_idx, "Test")
+    return X_train, X_val, X_test, y_train, y_val, y_test
+
+
+def build_sample_weights(y, dates, half_life_days: int = 365 * 3,
+                          class_balance_strength: float = CLASS_BALANCE_STRENGTH):
+    days_before_end = (dates.max() - dates).dt.days.values
+    recency_weight = 0.5 ** (days_before_end / half_life_days)
+
+    if class_balance_strength > 0:
+        balanced = compute_sample_weight(class_weight="balanced", y=y)
+        class_weight = balanced ** class_balance_strength
+    else:
+        class_weight = 1.0
+
+    return class_weight * recency_weight
 
 
 def build_search_space():
@@ -436,7 +538,7 @@ def tune_hyperparameters(X_train, y_train, sample_weight):
     search.fit(X_train, y_train, sample_weight=sample_weight)
     print(f"\nBest CV log loss: {-search.best_score_:.3f}")
     print(f"Best params: {search.best_params_}\n")
-    return search.best_estimator_
+    return search
 
 
 def train():
@@ -446,16 +548,35 @@ def train():
     label_map = {"HOME_WIN": 0, "DRAW": 1, "AWAY_WIN": 2}
     y_encoded = y.map(label_map)
 
-    X_train, X_test, y_train, y_test = time_based_split(features, X, y_encoded)
-
-    class_weight = compute_sample_weight(class_weight="balanced", y=y_train)
+    X_train, X_val, X_test, y_train, y_val, y_test = time_based_split(features, X, y_encoded)
     train_dates = features.loc[X_train.index, "MatchDate"]
-    days_before_end = (train_dates.max() - train_dates).dt.days.values
-    half_life_days = 365 * 3
-    recency_weight = 0.5 ** (days_before_end / half_life_days)
-    sample_weight = class_weight * recency_weight
+    val_dates = features.loc[X_val.index, "MatchDate"]
 
-    model = tune_hyperparameters(X_train, y_train, sample_weight)
+    sample_weight_train = build_sample_weights(y_train, train_dates)
+
+    search = tune_hyperparameters(X_train, y_train, sample_weight_train)
+
+    if USE_XGBOOST:
+        final_params = search.best_params_.copy()
+        final_params["n_estimators"] = 3000
+        model = XGBClassifier(
+            objective="multi:softprob", num_class=3, eval_metric="mlogloss",
+            random_state=RANDOM_STATE, early_stopping_rounds=EARLY_STOPPING_ROUNDS,
+            **final_params,
+        )
+        model.fit(
+            X_train, y_train, sample_weight=sample_weight_train,
+            eval_set=[(X_val, y_val)], verbose=False,
+        )
+        print(f"Early stopping selected {model.best_iteration + 1} trees "
+              f"(validation mlogloss {model.best_score:.3f})")
+    else:
+        X_train_full = pd.concat([X_train, X_val])
+        y_train_full = pd.concat([y_train, y_val])
+        dates_full = pd.concat([train_dates, val_dates])
+        sample_weight_full = build_sample_weights(y_train_full, dates_full)
+        model = search.best_estimator_
+        model.fit(X_train_full, y_train_full, sample_weight=sample_weight_full)
 
     preds = model.predict(X_test)
     probs = model.predict_proba(X_test)
