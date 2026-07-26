@@ -117,11 +117,6 @@ prefect
     └── deployment.md
 ```
 
-## Documentation
-
-Full docs (architecture, feature pipeline details, deployment guide) are
-built with MkDocs:
-
 ```bash
 pip install mkdocs mkdocs-material
 mkdocs serve   # http://localhost:8000
